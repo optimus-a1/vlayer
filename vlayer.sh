@@ -1,12 +1,12 @@
 #!/bin/bash
 
-# VLayer 一键安装与测试脚本 v17
+# VLayer 一键安装与测试脚本 v16（新增批量 ETH 转账模块）
 # 特性：
 # - Testnet 支持选择项目或全部执行
 # - 支持多个 API Token 和 Private Key，生成 JSON 数组格式
 # - 每个项目对每个账户轮流执行 Testnet，失败不会中断
 # - 自动无限循环测试，每 10 分钟重复
-# - 添加转账功能并处理错误重试
+# - 新增批量 ETH 转账（固定金额，逐行输入地址，重试 2 次，显示失败地址）
 
 set -e
 
@@ -41,8 +41,8 @@ install_dependencies() {
     check_and_install unzip "apt install -y unzip"
     check_and_install git "apt install -y git"
     check_and_install jq "apt install -y jq"
-    check_and_install screen "apt install -y screen"  # 新增 screen
-    check_and_install node "curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt install -y nodejs"  # 新增 Node.js v20
+    check_and_install screen "apt install -y screen"
+    check_and_install node "curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt install -y nodejs"
 
     # Docker
     if ! command -v docker &> /dev/null; then
@@ -59,70 +59,237 @@ install_dependencies() {
         echo_info "✅ Docker 已安装，跳过"
     fi
 
-    # 安装其他依赖（如 rust, foundry, bun 等）
-    # （省略部分代码，已在你的原脚本中）
+    # Rust
+    if ! command -v rustup &> /dev/null; then
+        echo_info "🦀 安装 Rust..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    fi
+    source $HOME/.cargo/env
+    rustup update
+
+    # Foundry
+    if ! command -v foundryup &> /dev/null; then
+        echo_info "🔨 安装 Foundry..."
+        curl -L https://foundry.paradigm.xyz | bash
+    fi
+    export PATH="$HOME/.foundry/bin:$PATH"
+    echo 'export PATH="$HOME/.foundry/bin:$PATH"' >> ~/.bashrc
+    foundryup
+
+    # Bun
+    if ! command -v bun &> /dev/null; then
+        echo_info "⚡ 安装 Bun..."
+        curl -fsSL https://bun.sh/install | bash
+    fi
+    export BUN_INSTALL="$HOME/.bun"
+    export PATH="$BUN_INSTALL/bin:$PATH"
+    echo 'export BUN_INSTALL="$HOME/.bun"' >> ~/.bashrc
+    echo 'export PATH="$BUN_INSTALL/bin:$PATH"' >> ~/.bashrc
+
+    # VLayer CLI
+    if ! command -v vlayerup &> /dev/null; then
+        echo_info "🌐 安装 VLayer CLI..."
+        curl -SL https://install.vlayer.xyz | bash
+    fi
+    export PATH="$HOME/.vlayer/bin:$PATH"
+    echo 'export PATH="$HOME/.vlayer/bin:$PATH"' >> ~/.bashrc
+    vlayerup
+
+    echo_info "所有依赖安装完成 ✅"
 }
 
-# 转账模块：执行转账并在失败时重试
-transfer_eth() {
-    sender_address=$1
-    recipient_address=$2
-    amount=$3
-    retries=0
-    max_retries=2
-    success=false
+init_project_only() {
+    name=$1
+    template=$2
+    mkdir -p vlayer
+    cd vlayer
+    if [ -d "$name" ]; then
+        echo_info "⚠️ 项目 $name 已存在，正在跳过初始化"
+        cd ..
+        return
+    fi
+    echo_info "初始化项目：$name（模板：$template）"
+    vlayer init "$name" --template "$template"
+    cd "$name"
+    forge build
+    cd vlayer
+    bun install
+    cd ../../../
+    echo_info "✅ $name 安装完成（未运行 prove:dev）"
+}
 
-    while [ $retries -le $max_retries ]; do
-        echo_info "尝试转账 $amount ETH 从 $sender_address 到 $recipient_address (尝试次数：$((retries+1)))"
-        # 假设使用 ethers.js 进行转账，命令或脚本的具体内容视乎你的设置
-        if bun run batchTransferETH.js --sender "$sender_address" --recipient "$recipient_address" --amount "$amount"; then
-            success=true
-            echo_info "✅ 转账成功！"
+generate_key_files() {
+    mkdir -p vlayer
+    echo_info "请输入多个 VLayer API Token 和 Private Key（输入空行以结束）"
+    tokens=()
+    private_keys=()
+    index=1
+
+    while true; do
+        echo_info "账户 $index"
+        read -rp "API Token: " token
+        if [ -z "$token" ]; then
             break
-        else
-            retries=$((retries + 1))
-            echo_error "❌ 转账失败，正在重试..."
         fi
+        read -rp "Private Key: " private_key
+        if [ -z "$private_key" ]; then
+            echo_error "Private Key 不能为空，跳过此账户"
+            continue
+        fi
+        tokens+=("\"$token\"")
+        private_keys+=("\"$private_key\"")
+        ((index++))
     done
 
-    if [ "$success" = false ]; then
-        echo_error "❌ 转账失败，地址 $sender_address 到 $recipient_address 的转账未成功。"
+    if [ ${#tokens[@]} -eq 0 ]; then
+        echo_error "未输入任何有效账户，跳过生成"
+        return
     fi
+
+    # 生成 JSON 数组格式的 api.json 和 key.json
+    api_json="[$(
+        IFS=,
+        echo "${tokens[*]}"
+    )]"
+    key_json="[$(
+        IFS=,
+        echo "${private_keys[*]}"
+    )]"
+
+    echo "$api_json" > vlayer/api.json
+    echo "$key_json" > vlayer/key.json
+    echo_info "已生成 vlayer/api.json 和 vlayer/key.json（JSON 数组格式）"
 }
 
-# 包括其他功能（如项目初始化、测试等）的代码（省略）
+test_with_testnet() {
+    project_dir=$1
+    if [ ! -d "vlayer/$project_dir/vlayer" ]; then
+        echo_error "❌ 项目目录 vlayer/$project_dir/vlayer 不存在，请先安装"
+        return 1
+    fi
+    echo_info "准备 Testnet 测试：$project_dir"
+    cd "vlayer/$project_dir/vlayer"
 
-show_menu() {
+    if [[ -f ../../api.json && -f ../../key.json ]]; then
+        # 读取 JSON 数组
+        api_tokens=($(cat ../../api.json | jq -r '.[]'))
+        private_keys=($(cat ../../key.json | jq -r '.[]'))
+
+        if [ ${#api_tokens[@]} -ne ${#private_keys[@]} ]; then
+            echo_error "❌ api.json 和 key.json 的账户数量不匹配"
+            cd ../../../
+            return 1
+        fi
+
+        for i in "${!api_tokens[@]}"; do
+            echo_info "正在为账户 $((i+1)) 测试项目 $project_dir"
+            API_TOKEN="${api_tokens[$i]}"
+            PRIVATE_KEY="${private_keys[$i]}"
+
+            echo_info "生成 .env.testnet.local 文件（账户 $((i+1))）"
+            cat <<EOF > .env.testnet.local
+VLAYER_API_TOKEN=$API_TOKEN
+EXAMPLES_TEST_PRIVATE_KEY=$PRIVATE_KEY
+CHAIN_NAME=optimismSepolia
+JSON_RPC_URL=https://sepolia.optimism.io
+EOF
+
+            echo_info "开始运行 Testnet 证明（账户 $((i+1))）..."
+            if ! bun run prove:testnet; then
+                echo_error "❌ 账户 $((i+1)) 测试失败，继续下一个账户..."
+            else
+                echo_info "✅ 账户 $((i+1)) 测试成功"
+            fi
+        done
+    else
+        echo_error "❌ 缺少 api.json 或 key.json 文件"
+        cd ../../../
+        return 1
+    fi
+    cd ../../../
+    return 0
+}
+
+testnet_menu() {
     echo -e "${YELLOW}
-========= VLayer 示例工具菜单 =========
-1. 环境安装
-2. 安装测试项目
-3. 对项目进行Testnet 测试（单项测试）
-4. 生成 api.json 和 key.json（支持多个账户）
-5. 启动自动测试循环（每 10 分钟）
-6. 执行转账（地址、金额）
-0. 退出脚本
-======================================
+========= Testnet 测试菜单 =========
+1. 测试 email_proof_project
+2. 测试 teleport_project
+3. 测试 time_travel_project
+4. 测试 my_first_project
+5. 所有项目全部测试
+0. 返回主菜单
+===================================
 ${NC}"
-    read -rp "请输入选项编号：" choice
-    case $choice in
-        1) install_dependencies ;;
-        2) show_project_menu ;;
-        3) testnet_menu ;;
-        4) generate_key_files ;;
-        5) auto_test_loop ;;
-        6)
-            read -rp "请输入发送地址： " sender_address
-            read -rp "请输入接收地址： " recipient_address
-            read -rp "请输入转账金额： " amount
-            transfer_eth "$sender_address" "$recipient_address" "$amount"
-            ;;
-        0) echo_info "退出脚本"; exit 0 ;;
-        *) echo_error "无效选项，请重新运行脚本";;
+    read -rp "请选择要运行的编号：" test_choice
+    case $test_choice in
+        1) test_with_testnet "email_proof_project" ;;
+        2) test_with_testnet "teleport_project" ;;
+        3) test_with_testnet "time_travel_project" ;;
+        4) test_with_testnet "my_first_project" ;;
+        5)
+           for project in "email_proof_project" "teleport_project" "time_travel_project" "my_first_project"; do
+               echo_info "开始测试项目：$project"
+               if ! test_with_testnet "$project"; then
+                   echo_error "❌ $project 测试失败，继续下一个项目..."
+               fi
+           done
+           ;;
+        0) return ;;
+        *) echo_error "无效选择，请重试。" ;;
     esac
 }
 
-# 启动菜单循环
-while true; do
-    show_menu
-done
+auto_test_loop() {
+    echo_info "启动自动测试循环（每 10 分钟运行一次）"
+    while true; do
+        echo_info "开始新一轮测试：$(date)"
+        for project in "email_proof_project" "teleport_project" "time_travel_project" "my_first_project"; do
+            echo_info "自动测试项目：$project"
+            if ! test_with_testnet "$project"; then
+                echo_error "❌ $project 测试失败，继续下一个项目..."
+            fi
+        done
+        echo_info "本轮测试完成，等待 10 分钟后继续..."
+        sleep 600
+    done
+}
+
+show_project_menu() {
+    echo -e "${YELLOW}
+========= 项目安装菜单 =========
+a. my_first_project (simple)
+b. email_proof_project
+c. teleport_project
+d. time_travel_project
+e. 全部安装
+0. 返回主菜单
+================================
+${NC}"
+    read -rp "请选择要安装的项目编号：" project_choice
+    case $project_choice in
+        a) init_project_only "my_first_project" "simple" ;;
+        b) init_project_only "email_proof_project" "simple-email-proof" ;;
+        c) init_project_only "teleport_project" "simple-teleport" ;;
+        d) init_project_only "time_travel_project" "simple-time-travel" ;;
+        e)
+           init_project_only "my_first_project" "simple"
+           init_project_only "email_proof_project" "simple-email-proof"
+           init_project_only "teleport_project" "simple-teleport"
+           init_project_only "time_travel_project" "simple-time-travel"
+           ;;
+        0) return ;;
+        *) echo_error "无效选择，请重试。" ;;
+    esac
+}
+
+batch_transfer_eth() {
+    echo_info "执行批量 ETH 转账（使用 key.json 中的第一个私钥）..."
+    mkdir -p vlayer/multisender/scripts
+    cd vlayer/multisender/scripts
+    if [ ! -f "package.json" ]; then
+        bun init
+    fi
+    bun add ethers
+    cat <<EOF > batchTransferETH.js
+const
