@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# VLayer 一键安装与测试脚本 v16（新增批量 ETH 转账模块）
+# VLayer 一键安装与测试脚本 v17（新增批量 ETH 转账模块）
 # 特性：
 # - Testnet 支持选择项目或全部执行
 # - 支持多个 API Token 和 Private Key，生成 JSON 数组格式
