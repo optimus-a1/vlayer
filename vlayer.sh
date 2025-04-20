@@ -1,12 +1,12 @@
 #!/bin/bash
 
-# VLayer 一键安装与测试脚本 v17（新增批量 ETH 转账模块）
+# VLayer 一键安装与测试脚本 v16（新增批量 ETH 转账模块）
 # 特性：
 # - Testnet 支持选择项目或全部执行
 # - 支持多个 API Token 和 Private Key，生成 JSON 数组格式
 # - 每个项目对每个账户轮流执行 Testnet，失败不会中断
 # - 自动无限循环测试，每 10 分钟重复
-# - 新增批量 ETH 转账（固定金额，逐行输入地址，重试 2 次，显示失败地址）
+# - 批量 ETH 转账：固定金额，逐行输入地址，失败重试 2 次，显示最终失败地址
 
 set -e
 
@@ -292,4 +292,180 @@ batch_transfer_eth() {
     fi
     bun add ethers
     cat <<EOF > batchTransferETH.js
-const
+const { ethers } = require("ethers");
+const fs = require("fs");
+const readline = require("readline");
+
+const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+});
+
+async function getFixedAmount() {
+    return new Promise((resolve) => {
+        rl.question("请输入固定的转账金额（ETH，例如 0.01）：", (amount) => {
+            try {
+                const amountWei = ethers.parseEther(amount.trim());
+                if (amountWei <= 0) throw new Error("金额必须大于 0");
+                resolve(amountWei);
+            } catch (error) {
+                console.error(\`无效金额：\${amount}，请重新输入\`);
+                getFixedAmount().then(resolve);
+            }
+        });
+    });
+}
+
+async function getAddresses() {
+    const addresses = [];
+    console.log("请输入目标地址，每行一个地址（输入空行结束）");
+    console.log("示例：0x1234567890abcdef1234567890abcdef12345678");
+
+    return new Promise((resolve) => {
+        rl.on("line", (line) => {
+            line = line.trim();
+            if (line === "") {
+                rl.close();
+                resolve(addresses);
+                return;
+            }
+            if (!ethers.isAddress(line)) {
+                console.error(\`无效地址：\${line}，请继续输入下一个地址\`);
+                return;
+            }
+            addresses.push(line);
+        });
+    });
+}
+
+async function tryTransfer(wallet, address, amount, maxRetries = 2) {
+    let attempt = 0;
+    while (attempt <= maxRetries) {
+        try {
+            const feeData = await wallet.provider.getFeeData();
+            const tx = await wallet.sendTransaction({
+                to: address,
+                value: amount,
+                gasLimit: 21000,
+                maxFeePerGas: feeData.maxFeePerGas || ethers.parseUnits("2", "gwei"),
+                maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || ethers.parseUnits("1", "gwei")
+            });
+            console.log(\`交易哈希（尝试 \${attempt + 1}）：\${tx.hash}\`);
+            await tx.wait();
+            console.log(\`转账成功：\${address}\`);
+            return true;
+        } catch (error) {
+            attempt++;
+            console.error(\`转账失败（尝试 \${attempt}/\${maxRetries + 1}）：\${address}，错误：\${error.message}\`);
+            if (attempt > maxRetries) {
+                return false;
+            }
+            await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+    }
+    return false;
+}
+
+async function main() {
+    const provider = new ethers.JsonRpcProvider("https://sepolia.optimism.io");
+    let privateKeys;
+    try {
+        privateKeys = JSON.parse(fs.readFileSync("../../key.json"));
+        if (!Array.isArray(privateKeys) || privateKeys.length === 0) {
+            throw new Error("key.json 为空或格式不正确");
+        }
+    } catch (error) {
+        console.error("错误：无法读取 vlayer/key.json 或文件格式错误");
+        process.exit(1);
+    }
+
+    const privateKey = privateKeys[0];
+    let wallet;
+    try {
+        wallet = new ethers.Wallet(privateKey, provider);
+    } catch (error) {
+        console.error(\`无效私钥：\${privateKey.slice(0, 10)}...\`);
+        process.exit(1);
+    }
+
+    console.log(\`\\n使用账户：\${wallet.address}\`);
+
+    const fixedAmount = await getFixedAmount();
+    console.log(\`固定转账金额：\${ethers.formatEther(fixedAmount)} ETH\`);
+
+    const addresses = await getAddresses();
+    if (addresses.length === 0) {
+        console.error("错误：未输入任何有效地址");
+        process.exit(1);
+    }
+
+    const balance = await provider.getBalance(wallet.address);
+    const totalAmount = fixedAmount * BigInt(addresses.length);
+    if (balance < totalAmount) {
+        console.error(\`账户余额不足：\${ethers.formatEther(balance)} ETH，需 \${ethers.formatEther(totalAmount)} ETH\`);
+        process.exit(1);
+    }
+
+    console.log(\`\\n开始向 \${addresses.length} 个地址转账...\`);
+    const failedAddresses = [];
+    for (const address of addresses) {
+        console.log(\`\\n向 \${address} 转账 \${ethers.formatEther(fixedAmount)} ETH\`);
+        const success = await tryTransfer(wallet, address, fixedAmount);
+        if (!success) {
+            failedAddresses.push(address);
+        }
+    }
+
+    if (failedAddresses.length > 0) {
+        console.log("\\n以下地址转账失败（经过 3 次尝试）：");
+        failedAddresses.forEach(address => console.log(\`- \${address}\`));
+    } else {
+        console.log("\\n所有转账均成功！");
+    }
+
+    console.log("\\n所有转账处理完成");
+    process.exit(0);
+}
+
+main().catch((error) => {
+    console.error("脚本执行错误：", error.message);
+    process.exit(1);
+});
+EOF
+    bun run batchTransferETH.js
+    cd ../../../
+    echo_info "✅ 批量转账完成"
+}
+
+show_menu() {
+    echo -e "${YELLOW}
+========= VLayer 示例工具菜单 =========
+1. 环境安装
+2. 安装测试项目
+3. 对项目进行Testnet 测试（单项测试）
+4. 生成 api.json 和 key.json（支持多个账户）
+5. 启动自动测试循环（每 10 分钟）
+6. 批量 ETH 转账（使用 key.json 第一个私钥）
+0. 退出脚本
+=======================================
+${NC}"
+    read -rp "请输入选项编号：" choice
+    case $choice in
+        1) install_dependencies ;;
+        2) show_project_menu ;;
+        3) testnet_menu ;;
+        4) generate_key_files ;;
+        5) auto_test_loop ;;
+        6) batch_transfer_eth ;;
+        0) echo_info "退出脚本"; exit 0 ;;
+        *) echo_error "无效选项，请重新运行脚本";;
+    esac
+}
+
+echo_info "加载 bash 环境..."
+source ~/.bashrc || source /root/.bashrc
+export PATH="$HOME/.bun/bin:$HOME/.vlayer/bin:$HOME/.foundry/bin:$PATH"
+
+while true; do
+    show_menu
+done
