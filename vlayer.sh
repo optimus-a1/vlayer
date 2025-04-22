@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# VLayer 一键安装与测试脚本 v16（新增批量 ETH 转账模块）
+# VLayer 一键安装与测试脚本 v17（增加重新安装可以删除原来的项目内容）
 # 特性：
 # - Testnet 支持选择项目或全部执行
 # - 支持多个 API Token 和 Private Key，生成 JSON 数组格式
@@ -104,10 +104,23 @@ init_project_only() {
     mkdir -p vlayer
     cd vlayer
     if [ -d "$name" ]; then
-        echo_info "⚠️ 项目 $name 已存在，正在跳过初始化"
-        cd ..
-        return
+        echo_info "⚠️ 项目 $name 已存在。请选择："
+        echo -e "${YELLOW}1. 跳过（保留原项目）"
+        echo -e "2. 删除并重新安装${NC}"
+        read -rp "请输入选项编号（默认跳过）：" action_choice
+        case "$action_choice" in
+            2)
+                echo_info "正在删除旧项目目录 $name..."
+                rm -rf "$name"
+                ;;
+            *)
+                echo_info "已选择跳过安装 $name"
+                cd ..
+                return
+                ;;
+        esac
     fi
+
     echo_info "初始化项目：$name（模板：$template）"
     vlayer init "$name" --template "$template"
     cd "$name"
@@ -115,7 +128,7 @@ init_project_only() {
     cd vlayer
     bun install
     cd ../../../
-    echo_info "✅ $name 安装完成（未运行 prove:dev）"
+    echo_info "✅ $name 安装完成"
 }
 
 generate_key_files() {
